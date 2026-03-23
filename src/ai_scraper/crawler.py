@@ -5,7 +5,7 @@ import time
 
 import anthropic
 
-from .ai import judge_content, judge_links
+from .ai import clean_content, judge_links
 from .fetcher import clean_html, extract_links, fetch_html, get_title, html_to_markdown
 from .models import CrawlState, Page
 
@@ -26,7 +26,7 @@ def crawl(state: CrawlState, client: anthropic.Anthropic) -> None:
             break
 
         url, depth = state.queue.pop(0)
-        url = url.split("#")[0]
+        url = url.split("#")[0].rstrip("/")
 
         if url in state.visited:
             continue
@@ -37,43 +37,54 @@ def crawl(state: CrawlState, client: anthropic.Anthropic) -> None:
             depth, len(state.pages), len(state.queue), url,
         )
 
+        # Fetch
         html = fetch_html(url, timeout=cfg.request_timeout)
         if html is None:
             continue
 
         time.sleep(cfg.request_delay)
 
-        # Parse & clean
-        soup = clean_html(html)
+        # Extract title from raw HTML
         title = get_title(html)
+
+        # Clean HTML and convert to markdown
+        soup = clean_html(html)
         raw_md = html_to_markdown(soup)
 
-        if len(raw_md.strip()) < 50:
+        if len(raw_md.strip()) < 30:
             log.info("   ⏭  Too little content, skipping.")
             continue
 
-        # AI content check
-        log.info("   🤖 Judging content relevance…")
-        cleaned_md = judge_content(client, cfg.model, cfg.topic, title, raw_md)
+        # AI cleans up the content (removes boilerplate remnants)
+        log.info("   🧹 Cleaning content with AI…")
+        cleaned_md = clean_content(client, cfg.model, cfg.topic, title, raw_md)
 
-        if cleaned_md is None:
-            log.info("   ❌ Page deemed irrelevant, skipping.")
-            continue
+        log.info(
+            "   ✅ Kept: %s (%d chars)",
+            title, len(cleaned_md),
+        )
+        state.pages.append(
+            Page(url=url, title=title, markdown=cleaned_md, depth=depth)
+        )
 
-        log.info("   ✅ Accepted: %s", title)
-        state.pages.append(Page(url=url, title=title, markdown=cleaned_md, depth=depth))
-
-        # Follow links?
+        # Follow links if we haven't hit max depth
         if depth < cfg.max_depth:
             links = extract_links(html, url)
             if links:
-                log.info("   🔗 Found %d links, asking AI which to follow…", len(links))
+                log.info(
+                    "   🔗 Found %d links, asking AI which to follow…",
+                    len(links),
+                )
                 relevant_urls = judge_links(
-                    client, cfg.model, cfg.topic, url, links, cfg.domain_whitelist,
+                    client, cfg.model, cfg.topic, url, links,
+                    cfg.domain_whitelist,
                 )
                 new_urls = [u for u in relevant_urls if u not in state.visited]
                 log.info("   🔗 AI selected %d new links to follow.", len(new_urls))
                 for u in new_urls:
                     state.queue.append((u, depth + 1))
 
-    log.info("Crawl complete. Collected %d pages.", len(state.pages))
+    log.info(
+        "Crawl complete. Collected %d pages from %d visited URLs.",
+        len(state.pages), len(state.visited),
+    )
