@@ -1,0 +1,4 @@
+# Databricks Genie documentation seed URLs
+# One URL per line. Blank lines and #-comments are ignored.
+
+https://docs.databricks.com/en/genie/index.html
